@@ -6,18 +6,23 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import json
 import os
 import typing
+import warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal, Union
 
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
+import requests
 import torch
 from sklearn.base import check_is_fitted, is_classifier
 from sklearn.compose import ColumnTransformer, make_column_selector
+from sklearn.datasets import fetch_openml
 from sklearn.preprocessing import FunctionTransformer, OrdinalEncoder
+from sklearn.utils import Bunch
 from sklearn.utils.multiclass import check_classification_targets
 from torch import nn
 
@@ -1012,3 +1017,148 @@ def meta_dataset_collator(batch: list, padding_val: float = 0.0) -> tuple:
             items_list.append([batch[r][item_idx] for r in range(batch_sz)])
 
     return tuple(items_list)
+
+
+def fetch_dataset(
+    name: str | None = None,
+    data_id: int | None = None,
+    *,
+    force_openml: bool = False,
+    return_X_y: bool = False,
+    **kwargs: dict,
+) -> Bunch | tuple:
+    """Fetch a dataset either from a Hugging Face dataset repository or from OpenML.
+
+    This function attempts to load a dataset by name or OpenML data ID from a
+    predefined Hugging Face dataset URL. If `force_openml` is True or Huggingface
+    request fails, it delegates the call to `fetch_openml`. The returned dataset mimics
+    the sklearn Bunch format or can return feature and target arrays directly.
+
+    Parameters
+    ----------
+    name : Optional[str], default=None
+        The name of the dataset to fetch from the Hugging Face repository.
+        If None, `data_id` must be provided and mapped internally to a dataset name.
+
+    data_id : Optional[int], default=None
+        The OpenML dataset ID used to identify the dataset. If `name` is None,
+        the function attempts to map this ID to a known dataset name.
+
+    force_openml : bool, default=False
+        If True, forcibly fetch the dataset from OpenML instead of Hugging Face.
+
+    return_X_y : bool, default=False
+        If True, return `(data, target)` tuple instead of a sklearn-like Bunch object.
+
+    Returns:
+    -------
+    Bunch or tuple
+        If `return_X_y` is False, returns a sklearn.utils.Bunch object with attributes:
+        - data: pd.DataFrame of features
+        - target: pd.Series or pd.DataFrame of target variable(s)
+        - frame: original combined DataFrame
+        - Other metadata loaded from dataset info JSON
+
+        If `return_X_y` is True, returns a tuple `(data, target)`.
+
+    Raises:
+    ------
+    AssertionError
+        If neither `name` nor `data_id` is provided or if `data_id` cannot be mapped to
+        a valid dataset name.
+
+    RuntimeError
+        If there is any error loading or parsing the dataset files (CSV or JSON) from
+        the Hugging Face URL, including network issues, file format errors, or JSON
+        decoding failures.
+
+
+    Notes:
+    -----
+    The function uses a fixed mapping from OpenML IDs to dataset names for supported
+    datasets. Dataset files are expected at the Hugging Face dataset repository URL,
+    with CSV data and JSON metadata describing the dataset, including target variable
+    names.
+
+    Example:
+    -------
+    >>> fetch_huggingface(name='boston')
+    >>> fetch_huggingface(data_id=531, return_X_y=True)
+    >>> fetch_huggingface(name='parkinsons', force_openml=True)
+    """
+    if force_openml:
+        return fetch_openml(name=name, data_id=data_id, return_X_y=return_X_y, **kwargs)
+
+    assert name or data_id, "At least one of 'name' or 'data_id' must be provided."
+
+    # Replace with correct HF path if available
+    BASE_HF_DATASET_PATH = "https://huggingface.co/datasets/MagnusBuehler/example_datasets/resolve/main/example_datasets"
+
+    id_name_map = {
+        531: "boston",
+        42712: "bike_sharing_demand",
+        1488: "parkinsons",
+        31: "credit-g",
+        204: "cholesterol",
+        53: "heart-statlog",
+        37: "diabetes",
+        8: "liver-disorders",
+        44973: "grid_stability",
+        44959: "concrete_compressive_strength",
+    }
+
+    name = name or id_name_map.get(data_id)
+    assert name is not None, (
+        f"Invalid arguments: neither a supported `name` nor a known `data_id`"
+        f" was provided.\n"
+        f"Supported IDs: {list(id_name_map.keys())}. Use `force_openml=True` for"
+        f" additional datasets."
+    )
+
+    # to make querying of dataset names more robust, we remove all
+    # leading and trailing whitespaces and transform all characters to lowercase.
+    query_name = name.replace(" ", "_").strip().lower()
+
+    base_url = f"{BASE_HF_DATASET_PATH}/{query_name}"
+
+    # In case anything goes wrong with the request using HuggingFace, we default
+    # back to sklearn's `fetch_openml` function.
+    need_fallback = False
+    try:
+        ds_data = pd.read_csv(f"{base_url}/data.csv")
+    except pd.errors.ParserError as e:
+        need_fallback = True
+        warnings.warn(
+            f"Failed to parse CSV data for dataset '{name}': {e}", stacklevel=2
+        )
+
+    except Exception as e:  # noqa: BLE001
+        need_fallback = True
+        warnings.warn(f"Error loading CSV for dataset '{name}': {e}", stacklevel=2)
+
+    try:
+        response = requests.get(f"{base_url}/ds_info.json", timeout=180)
+        response.raise_for_status()
+        ds_info = json.loads(response.text)
+    except (requests.exceptions.RequestException, json.JSONDecodeError, Exception) as e:
+        need_fallback = True
+        warnings.warn(
+            f"Failed to load or parse metadata JSON for dataset '{name}': {e}",
+            stacklevel=2,
+        )
+
+    if need_fallback:
+        return fetch_openml(name=name, data_id=data_id, return_X_y=return_X_y, **kwargs)
+
+    assert all(
+        target_name in ds_data.columns for target_name in ds_info["target_names"]
+    ), f"Target name(s) {ds_info['target_names']} not in columns: {ds_data.columns}"
+
+    target = ds_data[ds_info["target_names"]].squeeze()
+    # By convention, sklearn returs the features as "data" and the complete
+    # dataframe (features + target) as "frame"
+    data = ds_data.drop(ds_info["target_names"], axis=1)
+    if return_X_y:
+        return data, target
+    # Wrap results in a sklean-like object
+    return Bunch(data=data, **ds_info, frame=ds_data, target=target)

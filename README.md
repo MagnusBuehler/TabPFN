@@ -68,14 +68,14 @@ print("Accuracy", accuracy_score(y_test, predictions))
 
 #### Regression
 ```python
-from sklearn.datasets import fetch_openml
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 
 from tabpfn import TabPFNRegressor
+from tabpfn.utils import fetch_dataset
 
 # Load Boston Housing data
-df = fetch_openml(data_id=531, as_frame=True)  # Boston Housing dataset
+df = fetch_dataset(data_id=531, as_frame=True)  # Boston Housing dataset
 X = df.data
 y = df.target.astype(float)  # Ensure target is float for regression
 

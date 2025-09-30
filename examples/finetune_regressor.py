@@ -11,7 +11,6 @@ support for the Apple Silicon (MPS) backend is still under development.
 from functools import partial
 
 import numpy as np
-import sklearn.datasets
 import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
@@ -21,14 +20,14 @@ from tqdm import tqdm
 
 from tabpfn import TabPFNRegressor
 from tabpfn.finetune_utils import clone_model_for_evaluation
-from tabpfn.utils import meta_dataset_collator
+from tabpfn.utils import fetch_dataset, meta_dataset_collator
 
 
 def prepare_data(config: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Loads, subsets, and splits the California Housing dataset."""
     print("--- 1. Data Preparation ---")
     # Fetch Ames housing data from OpenML
-    bike_sharing = sklearn.datasets.fetch_openml(
+    bike_sharing = fetch_dataset(
         name="Bike_Sharing_Demand", version=2, as_frame=True, parser="auto"
     )
 
